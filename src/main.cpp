@@ -1,292 +1,291 @@
-//ESP32 code
-//TODO: Use i2s for blazing fast parallel write
-
 #include <Arduino.h>
-#include <array>
-#include "bitmaps.h"
+#include "lcd.h"
+#include "../include/Keypad_MC17.h"
+#include <Wire.h>
+#include "../include/Pages.h"
+#include "../include/Keyboard.h"
+#include "../include/bitmap.h"
 
-//Reset pin (P151)
-int _resetcalc = 13; //channel 0
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include "driver/adc.h"
 
-//Solder on wires onto testpads from left side to right side
-int _displayen = 15; //channel 1
-int _clock = 25; // channel 2
-int _shift = 26;  //channel 3 //CS line?! Low->Instruction Register(write) | High->Data Register
-int _myst =  27; //channel 4
-int _begin = 14; //channel 5
+RTC_DATA_ATTR int bootCount = 0;
 
-int _pins[8] = {4,16 ,17 ,18,19,21,22,23}; //D0-D7
+#define I2CADDR 0x20
+const byte ROWS = 7; 
+const byte COLS = 8; 
+//define the cymbols on the buttons of the keypads
+char hexaKeys[ROWS][COLS] = {
+  {K_Xhoch,  ')',  '+', K_RIGHT, K_DEL,     '*',   K_SIN,     K_DOWN},
+  {K_LN,     K_MP,  0 , 0,       0,         0,     K_TAN,     K_X},
+  {K_LOG,    K_SD, '-', K_MODE,  K_AC,      '/',   K_COS,     K_SUM},
+  {0,        ',',  '=', 0,       K_10hochx, K_ANS, '0',       0},
+  {K_WURZEL, K_ENG,'2', K_ALPHA, '8',       '5',   K_ANF,     K_CALC},
+  {K_Xquad,  '(',  '3', K_UP,    '9',       '6',   K_Xhmin1,  K_LEFT},
+  {K_BRUCH,  K_STO,'1', K_SHIFT, '7',       '4',   K_KLA_MIN, K_OPTN},
+};
+byte rowPins[ROWS] = {14, 13, 12, 11, 10, 9, 8};
+byte colPins[COLS] = {7, 6, 5, 4, 3, 2, 1, 0}; 
 
-void disableProc();
-void enableProc();
-void restartProc();
-void setTristate();
-void initlcd();
-void setbus(int a, int b, int c, int d, int e, int f, int g, int h);
-void setbus(uint8_t* arr);
-void beforewrite();
-void write();
-void write_dip();
+//initialize an instance of class NewKeypad
+static Keypad_MC17 CKeypad( makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS, I2CADDR); 
 
-void test();
-void setOutput();
-void beginwrite(int offset);
-void gpioMode(uint8_t gpio, uint8_t mode);
-void drawBitmap(int16_t x, int16_t y, const uint8_t bitmap[], int16_t w, int16_t h, bool color);
 
-// bool framebuffer[192][64];
-std::array<std::array<bool, 64>, 192> framebuffer; //Luca, plz stop this is a poc
-int xwert = 0;
+static CasioLCD lcd;
+
+void Snake();
+void DrawMainMenu();
+void HandleMainEnter();
+void HandleKey(char key);
+void DrawPage(int Page);
+void PagesMenu(int offset);
+
+int x = 0;
+int y = 0;
+int mainmenuindex = 0;
+int pagemenuindex = 0;
+int menuhandler = 0;
+int pageindex = 0;
+bool a = false;
+
 
 void setup() {
-  drawBitmap(0,0,BMP,192,64,true);
-  framebuffer[61][191] = true;
-  framebuffer[61][189] = true;
-  framebuffer[61][186] = true;
-  framebuffer[61][184] = true;
-
-  restartProc();
-  delay(2000);
-  digitalWrite(_displayen, HIGH);
-  digitalWrite(_myst, HIGH);
-  pinMode(_myst, OUTPUT);
-  pinMode(_displayen, OUTPUT);
-  setOutput();
-  disableProc();
-  delay(2000);
-  test();
+    adc_power_off();
+    WiFi.mode(WIFI_OFF); 
+    btStop();
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_12, 0);
+    ++bootCount;
+    if (bootCount <= 4) {
+        esp_deep_sleep_start();
+    } else {
+        bootCount = 1;
+    }
+    Serial.begin(115200);
+    Wire.begin( );
+    Wire.setClock( 1700000 );
+    lcd.BusTristate();
+    lcd.textFont(Font_4x6);
+    setCpuFrequencyMhz(10); //40mhz xtal
 }
 
 void loop() {
-  delay(1000);
-  for(int x = 0; x<192; x++) {
-    for(int y = 0; y<64;y++) {
-      framebuffer[x][y] = 0;
+    if (digitalRead(ON) == LOW) {
+        setCpuFrequencyMhz(240);
+        delay(1000);
+        lcd.TakeoverBus();
+        lcd.Writeframebuffer();
+        digitalWrite(17, LOW);
+        pinMode(17, OUTPUT);
+        pinMode(17, INPUT);
+        CKeypad.begin();
+        CKeypad.setDebounceTime(1);
+        a = true;
+        menuhandler = 0;
+        DrawMainMenu();
+        Serial.write("ON Low");
+        setCpuFrequencyMhz(10);
     }
-  }
-  drawBitmap(0,0,hacked,192,64,true);
-  test();
-  delay(1000);
-    for(int x = 0; x<192; x++) {
-    for(int y = 0; y<64;y++) {
-      framebuffer[x][y] = 0;
+    if (a) {
+        char Key = CKeypad.getKey();
+        if (Key != NO_KEY){
+            setCpuFrequencyMhz(240); //40mhz xtal
+            Serial.println(Key);
+            HandleKey(Key);
+            setCpuFrequencyMhz(10); //40mhz xtal
+        }
     }
-  }
-  drawBitmap(0,0,BMP,192,64,true);
-  test();
 }
 
-void test() {
-  beforewrite();
-  ets_delay_us(500);
-  beginwrite(0);
-  ets_delay_us(5);
-    for(int i = 1; i <=64; i++) {
-      for(int j = 0; j < 8; j++) {
-        ets_delay_us(1);
-        //setbus(framebuffer[i] + xwert);
-        setbus(
-          framebuffer[xwert][i],
-          framebuffer[xwert + 1][i],
-          framebuffer[xwert + 2][i],
-          framebuffer[xwert + 3][i],
-          framebuffer[xwert + 4][i],
-          framebuffer[xwert + 5][i],
-          framebuffer[xwert + 6][i],
-          framebuffer[xwert + 7][i]
-          );
-        write();
-        ets_delay_us(1);
-        setbus(
-          framebuffer[xwert + 8][i],
-          framebuffer[xwert + 1 + 8][i],
-          framebuffer[xwert + 2 + 8][i],
-          framebuffer[xwert + 3 + 8][i],
-          framebuffer[xwert + 4 + 8][i],
-          framebuffer[xwert + 5 + 8][i],
-          framebuffer[xwert + 6 + 8][i],
-          framebuffer[xwert + 7 + 8][i]
-          );
-        write();
-        ets_delay_us(1);
-        setbus(
-          framebuffer[xwert + 0 + 16][i],
-          framebuffer[xwert + 1 + 16][i],
-          framebuffer[xwert + 2 + 16][i],
-          framebuffer[xwert + 3 + 16][i],
-          framebuffer[xwert + 4 + 16][i],
-          framebuffer[xwert + 5 + 16][i],
-          framebuffer[xwert + 6 + 16][i],
-          framebuffer[xwert + 7 + 16][i]
-          );
-        write();
-        xwert = xwert + 24;
-      }
-      xwert = 0;
-      ets_delay_us(5);
-  }
-}
-
-void write() {
-  digitalWrite(_clock, 0);
-  digitalWrite(_shift, 0);
-  ets_delay_us(2);
-  setbus(1,1,1,1,1,1,1,1);
-  digitalWrite(_clock, 1);
-  digitalWrite(_shift, 1);
-}
-
-void write_dip() {
-  setbus(0,0,0,0,0,0,0,0);
-  digitalWrite(_clock, 0);
-  digitalWrite(_shift, 0);
-  digitalWrite(_myst, 0);
-  ets_delay_us(1);
-  digitalWrite(_myst, 1);
-  ets_delay_us(2);
-  setbus(1,1,1,1,1,1,1,1);
-  digitalWrite(_clock, 1);
-  digitalWrite(_shift, 1);
-}
-
-void beginwrite(int offset) {
-  setbus(0,0,0,0,0,0,0,0);
-  digitalWrite(_begin, 1);
-  ets_delay_us(1);
-  digitalWrite(_shift, 0);
-  ets_delay_us(1);
-  digitalWrite(_begin, 0);
-  digitalWrite(_shift, 1);
-  digitalWrite(_clock, 0);
-  ets_delay_us(1);
-  //CHECKME: Pixels get offset when you pulse _shift?
-  for(int i = 0; i<offset; i++) {
-    digitalWrite(_shift, 1);
-    ets_delay_us(1);
-    digitalWrite(_shift, 0);
-    ets_delay_us(1);
-  }
-  digitalWrite(_clock, 1);
-  digitalWrite(_shift, 1);
-}
-
-void beforewrite() {
-  setbus(1,0,0,0,0,0,1,0);
-  ets_delay_us(4);
-  digitalWrite(_shift, 0);
-  setbus(0,0,0,1,0,1,0,0);
-  ets_delay_us(3);
-  digitalWrite(_clock, 0);
-  ets_delay_us(4);
-  digitalWrite(_shift, 1);
-  digitalWrite(_clock, 1);  
-  ets_delay_us(4);
-  setbus(1,1,1,1,1,1,1,1);
-}
-
-void setbus(int a, int b, int c, int d, int e, int f, int g, int h) {
-  digitalWrite(_pins[0], a);
-  digitalWrite(_pins[1], b);
-  digitalWrite(_pins[2], c);
-  digitalWrite(_pins[3], d);
-  digitalWrite(_pins[4], e);
-  digitalWrite(_pins[5], f);
-  digitalWrite(_pins[6], g);
-  digitalWrite(_pins[7], h);
-}
-
-void setbus(uint8_t* arr) {
-  digitalWrite(_pins[0], arr[0]);
-  digitalWrite(_pins[1], arr[1]);
-  digitalWrite(_pins[2], arr[2]);
-  digitalWrite(_pins[3], arr[3]);
-  digitalWrite(_pins[4], arr[4]);
-  digitalWrite(_pins[5], arr[5]);
-  digitalWrite(_pins[6], arr[6]);
-  digitalWrite(_pins[7], arr[7]);
-}
-
-void disableProc() {
-  pinMode(_resetcalc, OUTPUT);
-  digitalWrite(_resetcalc, LOW);
-}
-
-void enableProc() {
-  pinMode(_resetcalc, OUTPUT);
-  digitalWrite(_resetcalc, HIGH);
-  pinMode(_resetcalc, INPUT);
-  setTristate();
-}
-
-void restartProc() {
-  setTristate();
-  disableProc();
-  ets_delay_us(10000);
-  enableProc();
-}
-
-void setTristate() {
-  for(int i = 0; i<8; i++) {
-    pinMode(_pins[i], INPUT);
-  }
-  pinMode(_resetcalc, INPUT);
-  pinMode(_displayen, INPUT);
-  pinMode(_clock, INPUT);
-  pinMode(_shift, INPUT);
-  pinMode(_myst, INPUT);
-  pinMode(_begin, INPUT);
-}
-
-void setOutput() {
-  digitalWrite(_resetcalc, LOW);
-  digitalWrite(_displayen, HIGH);
-  digitalWrite(_clock, HIGH);
-  digitalWrite(_shift, HIGH);
-  digitalWrite(_begin, LOW);
-  for(int i = 0; i<8; i++) {
-    digitalWrite(_pins[i], HIGH);
-    pinMode(_pins[i], OUTPUT);
-  }
-  pinMode(_resetcalc, OUTPUT);
-  pinMode(_displayen, OUTPUT);
-  pinMode(_clock, OUTPUT);
-  pinMode(_shift, OUTPUT);
-  pinMode(_myst, OUTPUT);
-  pinMode(_begin, OUTPUT);
-}
-
-void initlcd() {
-
-}
-
-
-void gpioMode(uint8_t gpio, uint8_t mode)
-{
-  if(mode == INPUT) GPIO.enable_w1tc = ((uint32_t)1 << gpio);
-  else GPIO.enable_w1ts = ((uint32_t)1 << gpio);
-
-  ESP_REG(DR_REG_IO_MUX_BASE + esp32_gpioMux[gpio].reg) // Register lookup
-    = ((uint32_t)2 << FUN_DRV_S)                        // Set drive strength 2
-    | (FUN_IE)                                          // Input enable
-    | ((uint32_t)2 << MCU_SEL_S);                       // Function select 2
-  GPIO.pin[gpio].val = 1;                               // Set pin HIGH
-}
-
-void drawBitmap(int16_t x, int16_t y, const uint8_t bitmap[],
-                              int16_t w, int16_t h, bool color) {
-
-  int16_t byteWidth = (w + 7) / 8; // Bitmap scanline pad = whole byte
-  uint8_t byte = 0;
-
-  for (int16_t j = 0; j < h; j++, y++) {
-    for (int16_t i = 0; i < w; i++) {
-      if (i & 7)
-        byte <<= 1;
-      else
-        byte = pgm_read_byte(&bitmap[j * byteWidth + i / 8]);
-      if (byte & 0x80)
-        //writePixel(x + i, y, color);
-        framebuffer[x+i][y] = color;
+void HandleKey(char key) {
+    //Serial.print("HandleKey | menuhandler: ");
+    //Serial.println(menuhandler);
+    if(menuhandler == 0) {
+        switch(key) {
+        case K_UP:
+            if(mainmenuindex > 0) mainmenuindex--;
+            DrawMainMenu();
+            break;
+        case K_DOWN:
+            if(mainmenuindex < 4) mainmenuindex++;
+            DrawMainMenu();
+            break;
+        case '=':
+            HandleMainEnter();
+            break;
+        default:
+            break;
+        }
+        return;
     }
-  }
+    if(menuhandler == 1) {
+        switch(key) {
+        case K_LEFT:
+            if(pageindex > 0) pageindex--;
+            DrawPage(pageindex);
+            break;
+        case K_RIGHT:
+            if(pageindex < PAGECOUNT - 1) pageindex++;
+            DrawPage(pageindex);
+            break;
+        case K_UP:
+            menuhandler = 0;
+            DrawMainMenu();
+            break;
+        case K_AC:
+        case '=':
+            CKeypad.end();
+            lcd.BusTristate();
+            a = false;
+            bootCount = 0;
+            esp_deep_sleep_start();
+            //HandleMainEnter();
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+    if(menuhandler == 2) {
+        switch(key) {
+        case K_UP:
+            if(pagemenuindex > 0) pagemenuindex--;
+            PagesMenu(pagemenuindex/10);
+            break;
+        case K_DOWN:
+            if(pagemenuindex < PAGECOUNT - 1) pagemenuindex++;
+            PagesMenu(pagemenuindex/10);
+            break;
+        case '=':
+            DrawPage(pagemenuindex);
+            break;
+        case K_AC:
+            menuhandler = 0;
+            DrawMainMenu();
+        default:
+            break;
+        }
+        return;
+    }
+}
+
+void HandleMainEnter() {
+    //Serial.print("HandleMainEnter: ");
+    //Serial.println(mainmenuindex);
+    switch(mainmenuindex) {
+        case 0: //Exit
+            CKeypad.end();
+            lcd.BusTristate();
+            a = false;
+            break;
+        case 1:
+            CKeypad.end();
+            lcd.BusTristate();
+            a = false;
+            bootCount = 0;
+            esp_deep_sleep_start();
+            break;
+        case 2:
+            menuhandler = 1;
+            DrawPage(0);
+            break;
+        case 3:
+            menuhandler = 2;
+            pagemenuindex = 0;
+            PagesMenu(0);
+            break;
+        case 4: 
+            Snake();
+
+        default:
+            break;
+    }
+}
+
+void Snake() {
+        /*lcd.ClearFB();
+        lcd.rect(0,3,192,64, true);
+        lcd.textFont(Font_5x7);
+        lcd.text("S N A K E", 70, 30, false);
+        lcd.text("---------", 70, 38, false);
+        lcd.Writeframebuffer();
+        vTaskDelay(2000);*/
+        
+        int plx = 10;
+        int ply = 10;
+        CKeypad.setDebounceTime(1);
+
+        while(true) {
+            CKeypad.getKeys();
+               for (int i=0; i<LIST_MAX; i++)   // Scan the whole key list.
+               {
+                     int key = 0;
+                    switch (CKeypad.key[i].kstate) {  // Report active key state : IDLE, PRESSED, HOLD, or RELEASED
+                       case PRESSED:
+                       case HOLD:
+                           key = 1;
+                           break;
+                    }
+                    if(key) {
+                    switch(CKeypad.key[i].kchar) {
+                        case K_UP:
+                            ply--;
+                            break;
+                        case K_DOWN:
+                            ply++;
+                            break;
+                        case K_LEFT:
+                            plx--;
+                            break;
+                        case K_RIGHT:
+                            plx++;
+                            break;
+                    } }
+                 
+               }
+             
+        lcd.ClearFB();
+        lcd.DrawBitmap(plx, ply, SPRITE_SNEK, 8, 8, true);
+        lcd.DrawBitmap(plx-8, ply, SPRITE_SNEK_BLOK, 8, 8, true);
+        lcd.DrawBitmap(plx-8*2, ply, SPRITE_SNEK_BLOK, 8, 8, true);
+        lcd.Writeframebuffer();
+        }
+}
+
+void DrawMainMenu() {
+    lcd.ClearFB();
+    lcd.textFont(Font_5x7);
+    lcd.text("CasioMod v0.1", 60, 2, true);
+    lcd.text("1: Exit (Press [ON] to return)", 0, 2 + lcd.textFontHeight(), 0 ^ mainmenuindex );
+    lcd.text("2: GO INTO DEEP SLEEP", 0, 2 + lcd.textFontHeight() * 2, 1 ^ mainmenuindex );
+    lcd.text("3: Show Pages", 0, 2 + lcd.textFontHeight() * 3, 2 ^ mainmenuindex );
+    lcd.text("4: Content", 0, 2 + lcd.textFontHeight() * 4, 3 ^ mainmenuindex );
+    lcd.text("5: TestFunc", 0, 2 + lcd.textFontHeight() * 5, 4 ^ mainmenuindex );
+    lcd.Writeframebuffer();
+}
+
+void DrawPage(int Page) {
+    lcd.ClearFB();
+    lcd.textFont(Font_4x6);
+
+    lcd.text(Pages[Page], 0, 1, true);
+
+    lcd.Writeframebuffer();
+}
+
+void PagesMenu(int offset) {
+    lcd.ClearFB();
+    lcd.textFont(Font_4x6);
+    int cnt = 0;
+    for(int i = 10 * offset; (i < 10 * (offset + 1)) && (i <= PAGECOUNT); i++) {
+        //char buf[192];
+        //const char* str = Pages[i];
+        //for(int j = 0; j <= 192; j++) {
+        //    int c = *str+j;
+        //    if (c == '\n') break;
+        //    buf[j] = c;
+        //}
+        lcd.text(Pages[i], 0, 2 + lcd.textFontHeight()*cnt++, i ^ pagemenuindex, true);
+    }
+    lcd.Writeframebuffer();
 }
